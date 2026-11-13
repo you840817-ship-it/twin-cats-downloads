@@ -1,0 +1,56 @@
+name: Publish download release
+on:
+  workflow_dispatch:
+    inputs:
+      binary_url:
+        description: Short-lived URL for the verified Windows ZIP
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the authorized binary
+        env:
+          ASSET_URL: ${{ inputs.binary_url }}
+        run: |
+          echo "::add-mask::$ASSET_URL"
+          python - <<'PY'
+          import os, urllib.parse
+          u=urllib.parse.urlparse(os.environ['ASSET_URL'])
+          assert u.scheme=='https' and u.hostname in ['release-assets.githubusercontent.com','objects.githubusercontent.com']
+          PY
+          mkdir -p dist
+          curl --fail --silent --show-error --location --retry 3 "$ASSET_URL" --output dist/Twin-Cats-0.2.5-Windows-x64.zip
+      - name: Verify and prepare the public files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,shutil,zipfile
+          binary=Path('dist/Twin-Cats-0.2.5-Windows-x64.zip')
+          digest=hashlib.file_digest(binary.open('rb'),'sha256').hexdigest()
+          assert digest=='d5c6f3189e45a3b9d9d4cd679c9beb0b1c71f086400f0391c0f145b1ea9f4549','Windows ZIP checksum mismatch'
+          with zipfile.ZipFile(binary) as z:
+            assert z.testzip() is None
+            assert 'Twin Cats.exe' in z.namelist()
+          allowed={'Original-Cat-Duo.twincats.json','Photo-Cat-Duo.twincats.json','Readme.zh-CN.txt'}
+          assert {p.name for p in Path('files').iterdir()}==allowed
+          for name in allowed:shutil.copyfile(Path('files')/name,Path('dist')/name)
+          lines=[]
+          for p in sorted(Path('dist').iterdir()):
+            lines.append(hashlib.file_digest(p.open('rb'),'sha256').hexdigest()+'  '+p.name)
+          Path('dist/SHA256SUMS.txt').write_text('\n'.join(lines)+'\n')
+          print('Verified Windows ZIP and public asset allowlist.')
+          PY
+      - name: Publish the public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view v0.2.5 >/dev/null 2>&1; then
+            gh release create v0.2.5 --target "$GITHUB_SHA" --title '双猫下班搭档 v0.2.5 · Windows 预览版' --notes-file release-notes.md --draft --prerelease
+          fi
+          gh release upload v0.2.5 dist/* --clobber
+          gh release edit v0.2.5 --draft=false --prerelease --notes-file release-notes.md
